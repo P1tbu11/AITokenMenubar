@@ -7,7 +7,7 @@ struct QuotaItem: Codable, Identifiable {
     let quota: Double
     let currency: String
     let expire_at: String
-    let usage: Double
+    var usage: Double
     let platform_label: String
 
     var usagePercent: Double {
@@ -51,4 +51,17 @@ struct GetMyProfileResponse: Codable {
     let dept_id: Int
     let dept_name: String
     let official_id: Int
+}
+
+struct QuotaUsageItem: Codable {
+    let username: String
+    let platform: String
+    let period: String
+    let usage: Double
+    let currency: String
+    let quota: Double
+}
+
+struct GetQuotaUsageResponse: Codable {
+    let data: [QuotaUsageItem]
 }

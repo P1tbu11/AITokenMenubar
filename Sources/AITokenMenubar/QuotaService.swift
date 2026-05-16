@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import WebKit
 
 @MainActor
@@ -13,10 +14,12 @@ class QuotaService: ObservableObject {
     @Published var needsAuth = false
     @Published var isChecking = true
     @Published var selectedPlatform: String = ""
+    @Published var menuBarText: String = ""
 
     private let baseURL = "https://aitoken.woa.com"
     private var refreshTimer: Timer?
     private var authWindowController: AuthWindowController?
+    private var cancellables = Set<AnyCancellable>()
 
     nonisolated private static let cookieStorageKey = "savedCookies_v2"
     nonisolated private static let selectedPlatformKey = "selectedPlatform"
@@ -32,6 +35,18 @@ class QuotaService: ObservableObject {
     init() {
         loadCookies()
         selectedPlatform = UserDefaults.standard.string(forKey: Self.selectedPlatformKey) ?? ""
+
+        // Update menuBarText whenever quotaItems, selectedPlatform, or isAuthenticated changes
+        Publishers.CombineLatest3($quotaItems, $selectedPlatform, $isAuthenticated)
+            .map { items, platform, authenticated -> String in
+                guard authenticated else { return "" }
+                guard let item = items.first(where: { $0.platform == platform }),
+                      item.usagePercent > 0 else { return "" }
+                let pct = Int(item.usagePercent.rounded())
+                return pct > 0 ? "\(pct)%" : ""
+            }
+            .assign(to: &$menuBarText)
+
         Task {
             await checkAuth()
             if isAuthenticated {
@@ -41,7 +56,7 @@ class QuotaService: ObservableObject {
             }
             isChecking = false
         }
-        refreshTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, self.isAuthenticated else { return }
                 await self.fetchQuota()
@@ -80,7 +95,10 @@ class QuotaService: ObservableObject {
         defer { isLoading = false }
 
         do {
-            let body = try JSONEncoder().encode(["platform": "", "period": ""])
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM"
+            let currentPeriod = formatter.string(from: Date())
+            let body = try JSONEncoder().encode(["platform": "", "period": currentPeriod])
             var req = URLRequest(url: URL(string: "\(baseURL)/yak.aitoken.MyQuota/GetQuota")!)
             req.httpMethod = "POST"
             req.httpBody = body
@@ -107,7 +125,14 @@ class QuotaService: ObservableObject {
             }
 
             let decoded = try JSONDecoder().decode(GetQuotaResponse.self, from: data)
-            let items = decoded.data.filter { $0.quota > 0 }
+            var items = decoded.data.filter { $0.quota > 0 }
+
+            // Fetch real-time usage for each platform via GetQuotaUsage
+            for i in items.indices {
+                if let realUsage = await fetchRealTimeUsage(platform: items[i].platform) {
+                    items[i].usage = realUsage
+                }
+            }
 
             // restore previous selection, or default to first
             if !savedPlatform.isEmpty, items.contains(where: { $0.platform == savedPlatform }) {
@@ -125,6 +150,30 @@ class QuotaService: ObservableObject {
         } catch {
             print("[AIToken] fetchQuota error: \(error)")
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func fetchRealTimeUsage(platform: String) async -> Double? {
+        do {
+            let body = try JSONEncoder().encode(["platform": platform, "period": ""])
+            var req = URLRequest(url: URL(string: "\(baseURL)/yak.aitoken.MyQuota/GetQuotaUsage")!)
+            req.httpMethod = "POST"
+            req.httpBody = body
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue(baseURL, forHTTPHeaderField: "Origin")
+            req.setValue("\(baseURL)/profile/usage", forHTTPHeaderField: "Referer")
+            req.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+            req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            guard let httpResp = resp as? HTTPURLResponse, httpResp.statusCode == 200 else {
+                return nil
+            }
+            let decoded = try JSONDecoder().decode(GetQuotaUsageResponse.self, from: data)
+            return decoded.data.first?.usage
+        } catch {
+            print("[AIToken] fetchRealTimeUsage(\(platform)) error: \(error)")
+            return nil
         }
     }
 
