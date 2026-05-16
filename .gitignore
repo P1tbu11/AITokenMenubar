@@ -1,0 +1,8 @@
+.build/
+DerivedData/
+*.app/
+*.xcodeproj/
+xcuserdata/
+Packages/
+Package.resolved
+.DS_Store
